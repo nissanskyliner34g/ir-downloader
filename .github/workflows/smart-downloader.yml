@@ -3,17 +3,18 @@ name: '📦 حرفه‌ای: دانلود و ذخیره در مخزن'
 on:
   workflow_dispatch:
     inputs:
-      file_url:
-        description: '🔗 لینک مستقیم فایل'
+      file_urls:
+        description: '🔗 لینک مستقیم فایل‌ها (با کاما جدا کنید) مثال: url1,url2,url3'
         required: true
         type: string
+        default: 'LINK1,LINK2,LINK3'
       password:
         description: '🔐 رمز فایل فشرده (اختیاری)'
         required: false
         type: string
         default: ''
       split_size:
-        description: '📦 حجم هر تکه (پیش‌فرض: 95m) مثال: 95m, 100m, 200m'
+        description: '📦 حجم هر تکه (پیش‌فرض: 95m)'
         required: false
         type: string
         default: '95m'
@@ -33,85 +34,81 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y p7zip-full file
 
-      - name: 📥 دانلود فایل
-        id: download
+      - name: 📥 پردازش و دانلود همه فایل‌ها
+        id: process
         run: |
-          URL="${{ github.event.inputs.file_url }}"
-          echo "در حال دانلود از: $URL"
-          curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"
-          if [ $? -ne 0 ]; then exit 1; fi
-          ls -lh downloaded_file
-
-      - name: 🧠 تشخیص نوع و استخراج نام اصلی
-        id: classify
-        run: |
-          # نام اصلی از لینک (بدون پارامترها)
-          RAW_NAME=$(basename "${{ github.event.inputs.file_url }}" | sed 's/\?.*//' | sed 's/%20/ /g')
-          if [ -z "$RAW_NAME" ]; then RAW_NAME="unknown_file"; fi
+          # تبدیل ورودی: جدا کردن با کاما و حذف فاصله‌های اضافی
+          echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' > /tmp/urls.txt
           
-          # جدا کردن نام پایه (بدون پسوند) برای پوشه
-          BASENAME_NOEXT="${RAW_NAME%.*}"
-          if [ "$BASENAME_NOEXT" = "$RAW_NAME" ]; then
-            # فایل بدون پسوند
-            BASENAME_NOEXT="$RAW_NAME"
-          fi
-          # نام امن برای پوشه (جایگزینی کاراکترهای غیرمجاز با _)
-          FOLDER_NAME=$(echo "$BASENAME_NOEXT" | sed 's/[\\/:*?"<>|]/_/g')
-          if [ -z "$FOLDER_NAME" ]; then FOLDER_NAME="downloaded_file"; fi
+          while IFS= read -r URL || [ -n "$URL" ]; do
+            [ -z "$URL" ] && continue
+            
+            echo "========================================="
+            echo "🔽 شروع دانلود: $URL"
+            
+            # استخراج نام فایل از لینک
+            FILENAME=$(basename "$URL" | sed 's/\?.*//' | sed 's/%20/ /g')
+            if [ -z "$FILENAME" ]; then
+              FILENAME="downloaded_file_$(date +%s)"
+            fi
+            
+            SAFE_FILENAME=$(echo "$FILENAME" | sed 's/[\\/:*?"<>|]/_/g')
+            echo "نام فایل: $SAFE_FILENAME"
+            
+            curl -L --fail --retry 3 --retry-delay 2 --progress-bar -o "$SAFE_FILENAME" "$URL"
+            if [ $? -ne 0 ]; then
+              echo "❌ خطا در دانلود: $URL → ادامه به لینک بعدی"
+              continue
+            fi
+            
+            echo "✅ دریافت شد: $SAFE_FILENAME"
+            
+            # تشخیص دسته و ساخت پوشه
+            RAW_NAME="$SAFE_FILENAME"
+            BASENAME_NOEXT="${RAW_NAME%.*}"
+            [ "$BASENAME_NOEXT" = "$RAW_NAME" ] && BASENAME_NOEXT="$RAW_NAME"
+            FOLDER_NAME=$(echo "$BASENAME_NOEXT" | sed 's/[\\/:*?"<>|]/_/g')
+            [ -z "$FOLDER_NAME" ] && FOLDER_NAME="downloaded_file"
+            
+            MIME=$(file -b --mime-type "$SAFE_FILENAME")
+            EXT="${RAW_NAME##*.}"
+            EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+            
+            if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
+              CAT="video"
+            elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
+              CAT="audio"
+            elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
+              CAT="image"
+            elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
+              CAT="document"
+            else
+              CAT="other"
+            fi
+            
+            FINAL_DIR="downloads/$CAT/$FOLDER_NAME"
+            mkdir -p "$FINAL_DIR"
+            
+            rm -f "$FINAL_DIR"/*.7z*
+            
+            if [ -z "${{ github.event.inputs.password }}" ]; then
+              7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./$SAFE_FILENAME"
+            else
+              7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./$SAFE_FILENAME"
+            fi
+            
+            echo "✅ ذخیره شد: $FOLDER_NAME ← $SAFE_FILENAME"
+            
+            rm -f "$SAFE_FILENAME"
+            
+          done < /tmp/urls.txt
           
-          # نام امن برای فایل درون آرشیو (با پسوند)
-          ORIGINAL_FILENAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
-          
-          # تشخیص MIME و دسته‌بندی
-          MIME=$(file -b --mime-type downloaded_file)
-          EXT="${RAW_NAME##*.}"
-          EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
-          
-          if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
-            CAT="video"
-          elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
-            CAT="audio"
-          elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
-            CAT="image"
-          elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
-            CAT="document"
-          else
-            CAT="other"
-          fi
-          
-          echo "CAT=$CAT" >> $GITHUB_ENV
-          echo "FOLDER_NAME=$FOLDER_NAME" >> $GITHUB_ENV
-          echo "ORIGINAL_FILENAME=$ORIGINAL_FILENAME" >> $GITHUB_ENV
-          echo "✅ دسته: $CAT → زیرپوشه: $FOLDER_NAME"
-          echo "📄 نام اصلی فایل: $ORIGINAL_FILENAME"
-
-      - name: 🔄 تغییر نام فایل به نام اصلی
-        run: |
-          mv downloaded_file "${{ env.ORIGINAL_FILENAME }}"
-          echo "فایل به نام ${{ env.ORIGINAL_FILENAME }} تغییر نام یافت"
-          ls -lh "${{ env.ORIGINAL_FILENAME }}"
-
-      - name: 🗜️ فشرده‌سازی و تقسیم (با اعمال رمز)
-        run: |
-          FINAL_DIR="downloads/${{ env.CAT }}/${{ env.FOLDER_NAME }}"
-          mkdir -p "$FINAL_DIR"
-          
-          rm -f "$FINAL_DIR"/*.7z*
-          
-          if [ -z "${{ github.event.inputs.password }}" ]; then
-            7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./${{ env.ORIGINAL_FILENAME }}"
-          else
-            7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./${{ env.ORIGINAL_FILENAME }}"
-          fi
-          
-          echo "✅ پوشه: $FINAL_DIR"
-          echo "✅ فایل درون آرشیو: ${{ env.ORIGINAL_FILENAME }}"
-          ls -lh "$FINAL_DIR"
+          echo "🎉 همه لینک‌ها پردازش شدند."
 
       - name: 📝 کامیت و پوش به مخزن
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add downloads/
-          git commit -m "Add downloaded file: ${{ env.ORIGINAL_FILENAME }} (category: ${{ env.CAT }})" || echo "Nothing to commit"
+          git commit -m "Add multiple files [$(date +'%Y-%m-%d %H:%M')]" || echo "Nothing to commit"
           git push
